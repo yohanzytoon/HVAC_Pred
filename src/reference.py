@@ -44,7 +44,7 @@ xgb_model = XGBRegressor(n_estimators=100, learning_rate=0.1)
 lgbm_model = LGBMRegressor(n_estimators=100, learning_rate=0.1)
 mlp_model = MLPRegressor(hidden_layer_sizes=(100, 50), activation='relu', max_iter=1000)
 
-model = SARIMAX(y_train, order=(1,1,1), seasonal_order=(1,1,1,24))
+model = mlp_model
 model.fit(X_train, y_train)
 
 
@@ -69,24 +69,3 @@ cv_scores = cross_val_score(model,
 
 rmse_scores = np.sqrt(-cv_scores)
 print(f"RMSE CV: {rmse_scores.mean():.4f} ± {rmse_scores.std():.4f}")
-
-import matplotlib.pyplot as plt
-
-# Comparer prédictions vs réelles
-plt.figure(figsize=(10, 6))
-plt.scatter(y_val, predictions, alpha=0.5)
-plt.plot([y_val.min(), y_val.max()], [y_val.min(), y_val.max()], 'r--')
-plt.xlabel('Valeurs réelles')
-plt.ylabel('Prédictions')
-plt.title('Prédictions vs Valeurs réelles')
-plt.show()
-
-# Visualiser les résidus
-residuals = y_val - predictions
-plt.figure(figsize=(10, 6))
-plt.scatter(predictions, residuals, alpha=0.5)
-plt.axhline(y=0, color='r', linestyle='--')
-plt.xlabel('Prédictions')
-plt.ylabel('Résidus')
-plt.title('Résidus vs Prédictions')
-plt.show()
