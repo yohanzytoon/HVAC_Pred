@@ -251,7 +251,7 @@ for i, rmse in enumerate(val_rmse_per_horizon):
 ## ----------------------------------------------------------------------------------------------- ##
 ## ----------------------------------------------------------------------------------------------- ##
 
-# Function to extend predictions using recursive approach
+# Fix for the extend_predictions function
 def extend_predictions(model, initial_sequence, scaler_X, scaler_y, horizon=100):
     """
     Extends predictions beyond the model's native prediction horizon using recursive prediction
@@ -266,6 +266,12 @@ def extend_predictions(model, initial_sequence, scaler_X, scaler_y, horizon=100)
     Returns:
         Extended predictions and estimated errors
     """
+    import torch
+    
+    # Convert NumPy array to PyTorch tensor if needed
+    if isinstance(initial_sequence, np.ndarray):
+        initial_sequence = torch.tensor(initial_sequence, dtype=torch.float32)
+    
     device = next(model.parameters()).device
     seq_length = initial_sequence.shape[1]
     feature_dim = initial_sequence.shape[2]
@@ -285,10 +291,15 @@ def extend_predictions(model, initial_sequence, scaler_X, scaler_y, horizon=100)
             batch_pred = model(current_sequence.to(device))
             
             # Determine how many steps to use from this prediction
-            steps_to_use = min(batch_pred.shape[1], remaining_steps)
+            # Handle different model outputs formats (direct or sequence)
+            if len(batch_pred.shape) == 2:  # [batch, outputs]
+                steps_to_use = min(batch_pred.shape[1], remaining_steps)
+                pred_numpy = batch_pred[:, :steps_to_use].cpu().numpy()
+            else:  # [batch, seq, outputs] or other format
+                steps_to_use = min(batch_pred.shape[1], remaining_steps)
+                pred_numpy = batch_pred[:, :steps_to_use].cpu().numpy()
             
             # Store the predictions
-            pred_numpy = batch_pred[:, :steps_to_use].cpu().numpy()
             all_predictions.append(pred_numpy)
             
             # Update remaining steps
@@ -301,8 +312,6 @@ def extend_predictions(model, initial_sequence, scaler_X, scaler_y, horizon=100)
                 
                 # We need to create new input features that include the predictions
                 # This requires domain knowledge of your specific features
-                # For demonstration, let's assume we're mainly updating temperature_interieure
-                # and shifting the sequence forward
                 
                 # Shift sequence forward (remove oldest entries)
                 new_sequence = current_sequence[:, steps_to_use:, :].clone()
@@ -322,10 +331,11 @@ def extend_predictions(model, initial_sequence, scaler_X, scaler_y, horizon=100)
                     
                     # Update hour (assuming it's the 7th feature, index 6)
                     # This cycles through 0-23
-                    new_entries[:, i, 6] = (current_sequence[:, -1, 6] + i + 1) % 24
+                    if feature_dim > 6:  # Make sure we have enough features
+                        new_entries[:, i, 6] = (current_sequence[:, -1, 6] + i + 1) % 24
                 
                 # Normalize the new entries
-                new_entries_numpy = new_entries.numpy().reshape(-1, feature_dim)
+                new_entries_numpy = new_entries.cpu().numpy().reshape(-1, feature_dim)
                 new_entries_scaled = scaler_X.transform(new_entries_numpy).reshape(1, steps_to_use, feature_dim)
                 new_entries = torch.tensor(new_entries_scaled, dtype=torch.float32)
                 
@@ -361,10 +371,10 @@ def extend_predictions(model, initial_sequence, scaler_X, scaler_y, horizon=100)
     
     return combined_predictions[:horizon], np.array(mse_values), np.array(rmse_values)
 
-# Generate extended predictions and error estimates
+# When calling the function, use:
 extended_preds, mse_by_horizon, rmse_by_horizon = extend_predictions(
     model, 
-    X_val_scaled[:1].reshape(1, 24, len(feature_columns)),  # Use first validation example
+    X_val_scaled[:1].reshape(1, 24, len(feature_columns)),  # This is now handled correctly
     scaler_X,
     scaler_y,
     horizon=100
