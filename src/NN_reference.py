@@ -10,7 +10,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 
 # Définir le chemin des données
-data_dir = os.path.join('..', 'data')
+data_dir = os.path.join('data')
 train_path = os.path.join(data_dir, 'train_dataset.csv')
 test_path = os.path.join(data_dir, 'test_features.csv')
 
