@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import RobustScaler, StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
-from xgboost import XGBRegressor
+import xgboost as xgb
 from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
 import time
@@ -666,33 +666,75 @@ def train_xgboost_model(X_train, y_train, X_val, y_val, output_horizon=16, patie
         y_train_h = y_train[:, h]
         y_val_h = y_val[:, h]
         
-        # Initialize model with parameters to prevent overfitting
-        model = XGBRegressor(
-            n_estimators=500,       # Start with more estimators, early stopping will limit if needed
-            learning_rate=0.02,     # Lower learning rate
-            max_depth=5,            # Limit tree depth to prevent overfitting
-            min_child_weight=2,     # Require more observations per leaf
-            subsample=0.8,          # Use 80% of data per tree
-            colsample_bytree=0.8,   # Use 80% of features per tree
-            gamma=0.1,              # Minimum loss reduction for node splitting
-            reg_alpha=0.1,          # L1 regularization
-            reg_lambda=1.0,         # L2 regularization
-            random_state=42
-        )
+        # Create DMatrix objects (XGBoost's optimized data structure)
+        dtrain = xgb.DMatrix(X_train, label=y_train_h)
+        dval = xgb.DMatrix(X_val, label=y_val_h)
         
-        # Train with early stopping
-        model.fit(
-            X_train, y_train_h,
-            eval_set=[(X_val, y_val_h)],
-            eval_metric='rmse',
+        # Define parameters
+        params = {
+            'objective': 'reg:squarederror',  # Regression task
+            'learning_rate': 0.02,            # Lower learning rate for better convergence
+            'max_depth': 5,                   # Limit tree depth to prevent overfitting
+            'min_child_weight': 2,            # Require more observations per leaf
+            'subsample': 0.8,                 # Use 80% of data per tree
+            'colsample_bytree': 0.8,          # Use 80% of features per tree
+            'gamma': 0.1,                     # Minimum loss reduction for node splitting
+            'alpha': 0.1,                     # L1 regularization
+            'lambda': 1.0,                    # L2 regularization
+            'random_state': 42,               # For reproducibility
+            'eval_metric': 'rmse',            # Evaluation metric
+            'silent': 1                       # Less verbose output
+        }
+        
+        # Define evaluation list
+        evallist = [(dtrain, 'train'), (dval, 'validation')]
+        
+        # Train model with early stopping
+        bst = xgb.train(
+            params,
+            dtrain,
+            num_boost_round=500,          # Maximum number of rounds
+            evals=evallist,
             early_stopping_rounds=patience,
-            verbose=False
+            verbose_eval=False
         )
         
-        print(f"Horizon t+{h+1} - Best iteration: {model.best_iteration}, Val RMSE: {model.best_score:.4f}")
-        models.append(model)
+        # Get best score and iteration
+        best_score = bst.best_score
+        best_iteration = bst.best_iteration
+        
+        print(f"Horizon t+{h+1} - Best iteration: {best_iteration}, Val RMSE: {best_score:.4f}")
+        
+        # Save model
+        models.append(bst)
     
     return models
+
+# Modified prediction function for XGBoost models trained with xgb.train
+def predict_xgboost(models, X_data):
+    """
+    Generate predictions using XGBoost models trained with xgb.train
+    
+    Args:
+        models: List of XGBoost models (one per horizon)
+        X_data: Input features
+        
+    Returns:
+        Array of predictions with shape (n_samples, n_horizons)
+    """
+    # Convert to DMatrix for efficient prediction
+    dtest = xgb.DMatrix(X_data)
+    
+    # Initialize predictions array
+    n_samples = X_data.shape[0]
+    n_horizons = len(models)
+    predictions = np.zeros((n_samples, n_horizons))
+    
+    # Generate predictions for each horizon
+    for h, model in enumerate(models):
+        predictions[:, h] = model.predict(dtest)
+    
+    return predictions
 
 # Train LightGBM model with early stopping for each horizon
 def train_lightgbm_model(X_train, y_train, X_val, y_val, output_horizon=16, patience=10):
@@ -1669,25 +1711,43 @@ def run_hvac_forecasting(train_path='train_dataset.csv', test_path='test_feature
         tab_full_feature_scaler = tab_full_data['feature_scaler']
         tab_full_target_scaler = tab_full_data['target_scaler']
         
-        # Initialize and train final models for each horizon
         final_models = []
-        
+
         if best_model_idx == 3:  # XGBoost
             for h in range(horizon):
                 print(f"Training final XGBoost model for horizon t+{h+1}")
-                model = XGBRegressor(
-                    n_estimators=xgb_models[h].best_iteration + 10,  # Use best iteration + buffer
-                    learning_rate=0.02,
-                    max_depth=5,
-                    min_child_weight=2,
-                    subsample=0.8,
-                    colsample_bytree=0.8,
-                    gamma=0.1,
-                    reg_alpha=0.1,
-                    reg_lambda=1.0,
-                    random_state=42
+                
+                # Extract target for specific horizon
+                y_full_h = y_tab_full_scaled[:, h]
+                
+                # Create DMatrix object
+                dtrain_full = xgb.DMatrix(X_tab_full_scaled, label=y_full_h)
+                
+                # Define parameters
+                params = {
+                    'objective': 'reg:squarederror',
+                    'learning_rate': 0.02,
+                    'max_depth': 5,
+                    'min_child_weight': 2,
+                    'subsample': 0.8,
+                    'colsample_bytree': 0.8,
+                    'gamma': 0.1,
+                    'alpha': 0.1,  # L1 regularization (reg_alpha)
+                    'lambda': 1.0,  # L2 regularization (reg_lambda)
+                    'random_state': 42,
+                    'eval_metric': 'rmse'
+                }
+                
+                # Determine number of boosting rounds (use best_iteration from validation + buffer)
+                num_rounds = xgb_models[h].best_iteration + 10
+                
+                # Train model
+                model = xgb.train(
+                    params,
+                    dtrain_full,
+                    num_boost_round=num_rounds
                 )
-                model.fit(X_tab_full_scaled, y_tab_full_scaled[:, h])
+                
                 final_models.append(model)
             final_model_name = "XGBoost"
         
@@ -1864,6 +1924,248 @@ def run_hvac_forecasting(train_path='train_dataset.csv', test_path='test_feature
         'predictions': y_test_pred_inv,
         'submission': submission
     }
+    
+def run_xgboost_only(train_path='train_dataset.csv', test_path='test_features.csv'):
+    """
+    Run only the XGBoost part of the HVAC forecasting pipeline.
+    """
+    # Step 1: Load and preprocess data
+    train_df, test_df = load_and_preprocess_data(train_path, test_path)
+    
+    # Step 2: Feature engineering
+    print("\nPerforming feature engineering...")
+    train_fe = create_advanced_features(train_df)
+    test_fe = create_advanced_features(test_df)
+    
+    # Add lag and rolling features to training data
+    train_fe = add_lag_features(train_fe)
+    train_fe = add_rolling_features(train_fe)
+    train_fe = add_temporal_patterns(train_fe)
+    
+    # Remove rows with NaN values (from lag features)
+    train_fe = train_fe.dropna().reset_index(drop=True)
+    
+    print(f"Original training data shape: {train_df.shape}")
+    print(f"Processed training data shape: {train_fe.shape}")
+    
+    # Step 3: Prepare data for forecasting
+    lookback = 24  # Use 24 hours of data
+    horizon = 16   # Predict 16 steps ahead (4 hours)
+    
+    # Define features to use (exclude date and target columns)
+    feature_cols = [col for col in train_fe.columns 
+                   if col not in ['date', 'puissance_cvac', 'puissance_cvac_future', 'ID']]
+    
+    # Prepare tabular data for tree-based models
+    X_train_tab, y_train_tab = prepare_tabular_data(
+        train_fe,
+        lookback=lookback,
+        horizon=horizon,
+        features=feature_cols,
+        target='puissance_cvac'
+    )
+    
+    print(f"Tabular data shape: {X_train_tab.shape} -> {y_train_tab.shape}")
+    
+    # Step 4: Split data into training and validation sets (80-20 split)
+    split_idx = int(0.8 * len(X_train_tab))
+    
+    # Split tabular data
+    X_tab_train, X_tab_val = X_train_tab[:split_idx], X_train_tab[split_idx:]
+    y_tab_train, y_tab_val = y_train_tab[:split_idx], y_train_tab[split_idx:]
+    
+    print(f"Training set: {X_tab_train.shape[0]} samples")
+    print(f"Validation set: {X_tab_val.shape[0]} samples")
+    
+    # Step 5: Scale data
+    tab_scaled_data = scale_data(X_tab_train, y_tab_train, X_tab_val, y_tab_val)
+    X_tab_train_scaled = tab_scaled_data['X_train_scaled']
+    y_tab_train_scaled = tab_scaled_data['y_train_scaled']
+    X_tab_val_scaled = tab_scaled_data['X_val_scaled']
+    y_tab_val_scaled = tab_scaled_data['y_val_scaled']
+    tab_feature_scaler = tab_scaled_data['feature_scaler']
+    tab_target_scaler = tab_scaled_data['target_scaler']
+    
+    # Step 6: Train XGBoost models
+    print("\n===== Training XGBoost Models =====")
+    xgb_models = train_xgboost_model(
+        X_tab_train_scaled, 
+        y_tab_train_scaled, 
+        X_tab_val_scaled, 
+        y_tab_val_scaled,
+        output_horizon=horizon,
+        patience=10
+    )
+    
+    # Step 7: Evaluate XGBoost models
+    print("\n===== Evaluating XGBoost Models =====")
+    # Make predictions for validation set
+    val_preds = predict_xgboost(xgb_models, X_tab_val_scaled)
+    
+    # Calculate metrics
+    if tab_target_scaler is not None:
+        val_preds_inv = tab_target_scaler.inverse_transform(val_preds.reshape(-1, 1)).reshape(val_preds.shape)
+        y_val_inv = tab_target_scaler.inverse_transform(y_tab_val_scaled.reshape(-1, 1)).reshape(y_tab_val_scaled.shape)
+    else:
+        val_preds_inv = val_preds
+        y_val_inv = y_tab_val_scaled
+    
+    mae_per_horizon = [mean_absolute_error(y_val_inv[:, h], val_preds_inv[:, h]) for h in range(horizon)]
+    rmse_per_horizon = [np.sqrt(mean_squared_error(y_val_inv[:, h], val_preds_inv[:, h])) for h in range(horizon)]
+    r2_per_horizon = [r2_score(y_val_inv[:, h], val_preds_inv[:, h]) for h in range(horizon)]
+    
+    avg_mae = np.mean(mae_per_horizon)
+    avg_rmse = np.mean(rmse_per_horizon)
+    avg_r2 = np.mean(r2_per_horizon)
+    
+    print("\nXGBoost Evaluation:")
+    print(f"Average MAE: {avg_mae:.4f}")
+    print(f"Average RMSE: {avg_rmse:.4f}")
+    print(f"Average R²: {avg_r2:.4f}")
+    
+    xgb_metrics = {
+        'mae_per_horizon': mae_per_horizon,
+        'rmse_per_horizon': rmse_per_horizon,
+        'r2_per_horizon': r2_per_horizon,
+        'avg_mae': avg_mae,
+        'avg_rmse': avg_rmse,
+        'avg_r2': avg_r2,
+        'predictions': val_preds_inv,
+        'targets': y_val_inv
+    }
+    
+    # Step 8: Visualize results
+    # Plot RMSE by horizon
+    plt.figure(figsize=(12, 6))
+    plt.plot(range(1, horizon + 1), rmse_per_horizon, marker='o')
+    plt.title('RMSE by Forecast Horizon')
+    plt.xlabel('Horizon (15-min intervals)')
+    plt.ylabel('RMSE')
+    plt.grid(True)
+    plt.savefig('xgboost_rmse_by_horizon.png')
+    plt.show()
+    
+    # Plot sample predictions
+    plt.figure(figsize=(12, 6))
+    sample_idx = 0
+    plt.plot(range(1, horizon + 1), val_preds_inv[sample_idx], marker='o', label='XGBoost Prediction')
+    plt.plot(range(1, horizon + 1), y_val_inv[sample_idx], marker='x', linestyle='--', linewidth=2, label='Actual')
+    plt.xlabel('Horizon (15-min intervals)')
+    plt.ylabel('HVAC Power (kW)')
+    plt.title('XGBoost Predictions vs Actual')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig('xgboost_sample_prediction.png')
+    plt.show()
+    
+    # Step 9: Train on full dataset for final model
+    print("\n===== Training Final Models on Full Dataset =====")
+    
+    # Combine training and validation data
+    X_tab_full = np.vstack([X_tab_train, X_tab_val])
+    y_tab_full = np.vstack([y_tab_train, y_tab_val])
+    
+    # Scale full data
+    tab_full_data = scale_data(X_tab_full, y_tab_full)
+    X_tab_full_scaled = tab_full_data['X_train_scaled']
+    y_tab_full_scaled = tab_full_data['y_train_scaled']
+    tab_full_feature_scaler = tab_full_data['feature_scaler']
+    tab_full_target_scaler = tab_full_data['target_scaler']
+    
+    # Train final models for each horizon
+    final_models = []
+    
+    for h in range(horizon):
+        print(f"Training final XGBoost model for horizon t+{h+1}")
+        
+        # Extract target for specific horizon
+        y_full_h = y_tab_full_scaled[:, h]
+        
+        # Create DMatrix object
+        dtrain_full = xgb.DMatrix(X_tab_full_scaled, label=y_full_h)
+        
+        # Define parameters
+        params = {
+            'objective': 'reg:squarederror',
+            'learning_rate': 0.02,
+            'max_depth': 5,
+            'min_child_weight': 2,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'gamma': 0.1,
+            'alpha': 0.1,  # L1 regularization (reg_alpha)
+            'lambda': 1.0,  # L2 regularization (reg_lambda)
+            'random_state': 42,
+            'eval_metric': 'rmse'
+        }
+        
+        # Determine number of boosting rounds (use best_iteration from validation + buffer)
+        num_rounds = xgb_models[h].best_iteration + 10
+        
+        # Train model
+        model = xgb.train(
+            params,
+            dtrain_full,
+            num_boost_round=num_rounds
+        )
+        
+        final_models.append(model)
+    
+    # Step 10: Prepare test data for prediction
+    print("\n===== Generating Test Predictions =====")
+    
+    # Common features between train and test
+    common_features = list(set(feature_cols).intersection(set(test_fe.columns)))
+    common_features.sort()
+    
+    # Prepare tabular test data
+    X_test_tab = prepare_tabular_test_data(
+        test_df=test_fe,
+        train_df=train_fe,
+        lookback=lookback,
+        features=common_features
+    )
+    
+    # Scale test data
+    X_test_scaled = tab_full_feature_scaler.transform(X_test_tab)
+    
+    # Generate predictions
+    dtest = xgb.DMatrix(X_test_scaled)
+    y_test_pred = np.zeros((X_test_scaled.shape[0], horizon))
+    
+    for h in range(horizon):
+        y_test_pred[:, h] = final_models[h].predict(dtest)
+    
+    # Inverse transform predictions
+    y_test_pred_inv = tab_full_target_scaler.inverse_transform(y_test_pred.reshape(-1, 1)).reshape(y_test_pred.shape)
+    
+    # Create submission DataFrame
+    submission = pd.DataFrame()
+    submission['ID'] = test_df['ID'].values
+    
+    # Convert predictions to the required format (as a list or string)
+    submission['puissance_cvac_future'] = [list(pred) for pred in y_test_pred_inv]
+    
+    # Save predictions to CSV
+    submission.to_csv('xgboost_predictions.csv', index=False)
+    print("Predictions saved to 'xgboost_predictions.csv'")
+    
+    # Save model for future use
+    import joblib
+    joblib.dump(final_models, 'xgboost_models.joblib')
+    joblib.dump(tab_full_feature_scaler, 'xgboost_feature_scaler.joblib')
+    joblib.dump(tab_full_target_scaler, 'xgboost_target_scaler.joblib')
+    print("Models and scalers saved as joblib files")
+    
+    return {
+        'models': final_models,
+        'feature_scaler': tab_full_feature_scaler,
+        'target_scaler': tab_full_target_scaler,
+        'metrics': xgb_metrics,
+        'predictions': y_test_pred_inv,
+        'submission': submission
+    }
+
 
 # Run the full pipeline if script is executed directly
 if __name__ == "__main__":
@@ -1872,5 +2174,7 @@ if __name__ == "__main__":
     test_path = 'test_features.csv'
     
     # Run the pipeline
-    results = run_hvac_forecasting(train_path=train_path, test_path=test_path)
+    #results = run_hvac_forecasting(train_path=train_path, test_path=test_path)
+    results = run_xgboost_only(train_path=train_path, test_path=test_path)
+    
     print("\n===== Analysis Complete =====")
