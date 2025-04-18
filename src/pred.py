@@ -672,18 +672,17 @@ def train_xgboost_model(X_train, y_train, X_val, y_val, output_horizon=16, patie
         
         # Define parameters
         params = {
-            'objective': 'reg:squarederror',  # Regression task
-            'learning_rate': 0.02,            # Lower learning rate for better convergence
-            'max_depth': 5,                   # Limit tree depth to prevent overfitting
-            'min_child_weight': 2,            # Require more observations per leaf
-            'subsample': 0.8,                 # Use 80% of data per tree
-            'colsample_bytree': 0.8,          # Use 80% of features per tree
-            'gamma': 0.1,                     # Minimum loss reduction for node splitting
-            'alpha': 0.1,                     # L1 regularization
-            'lambda': 1.0,                    # L2 regularization
-            'random_state': 42,               # For reproducibility
-            'eval_metric': 'rmse',            # Evaluation metric
-            'silent': 1                       # Less verbose output
+            'objective': 'reg:pseudohubererror',  # More robust to outliers
+            'learning_rate': 0.05,                # Slightly higher learning rate
+            'max_depth': 7,                       # Deeper trees to capture complex patterns
+            'min_child_weight': 3,                # Balanced setting
+            'subsample': 0.8,                     # Some randomness for robustness
+            'colsample_bytree': 0.8,              # Some feature randomness
+            'gamma': 0.1,                         # Some pruning
+            'alpha': 0.5,                         # L1 regularization
+            'lambda': 1.0,                        # L2 regularization
+            'random_state': 42,
+            'eval_metric': 'rmse'
         }
         
         # Define evaluation list
